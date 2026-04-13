@@ -1,0 +1,240 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>LangSmith IFrame Renderer</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    :root {
+      --bg: #0a0a0a;
+      --surface: #141414;
+      --border: #262626;
+      --text: #e5e5e5;
+      --text-dim: #a3a3a3;
+      --accent: #6d28d9;
+      --accent-dim: #4c1d95;
+      --green: #22c55e;
+      --blue: #3b82f6;
+      --font-mono: 'SF Mono', 'Fira Code', 'JetBrains Mono', monospace;
+      --font-sans: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+    }
+    body {
+      font-family: var(--font-sans);
+      background: var(--bg);
+      color: var(--text);
+      padding: 16px;
+      line-height: 1.5;
+      overflow-x: hidden;
+    }
+    #waiting {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      min-height: 200px;
+      gap: 12px;
+      color: var(--text-dim);
+    }
+    #waiting .dot-pulse { display: inline-flex; gap: 4px; }
+    #waiting .dot-pulse span {
+      width: 6px; height: 6px; border-radius: 50%;
+      background: var(--accent);
+      animation: pulse 1.2s ease-in-out infinite;
+    }
+    #waiting .dot-pulse span:nth-child(2) { animation-delay: 0.2s; }
+    #waiting .dot-pulse span:nth-child(3) { animation-delay: 0.4s; }
+    @keyframes pulse {
+      0%, 80%, 100% { opacity: 0.3; transform: scale(0.8); }
+      40% { opacity: 1; transform: scale(1); }
+    }
+
+    #content { display: none; }
+    #content.visible { display: block; }
+
+    .header {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      margin-bottom: 16px;
+      padding-bottom: 12px;
+      border-bottom: 1px solid var(--border);
+    }
+    .badge {
+      font-size: 11px;
+      font-weight: 600;
+      padding: 2px 8px;
+      border-radius: 4px;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+    }
+    .badge-output { background: var(--accent-dim); color: #c4b5fd; }
+    .badge-reference { background: #1e3a5f; color: #93c5fd; }
+    .badge-count { background: var(--border); color: var(--text-dim); }
+    .timestamp { font-size: 12px; color: var(--text-dim); margin-left: auto; }
+
+    .tabs {
+      display: flex;
+      gap: 0;
+      border-bottom: 1px solid var(--border);
+      margin-bottom: 16px;
+    }
+    .tab {
+      padding: 8px 16px;
+      font-size: 13px;
+      font-weight: 500;
+      color: var(--text-dim);
+      cursor: pointer;
+      border-bottom: 2px solid transparent;
+      transition: all 0.15s;
+    }
+    .tab:hover { color: var(--text); }
+    .tab.active { color: var(--accent); border-bottom-color: var(--accent); }
+
+    .panel { display: none; }
+    .panel.active { display: block; }
+
+    .json-tree {
+      font-family: var(--font-mono);
+      font-size: 13px;
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 16px;
+      overflow-x: auto;
+      white-space: pre-wrap;
+      word-break: break-word;
+      max-height: 500px;
+      overflow-y: auto;
+    }
+
+    .key { color: #93c5fd; }
+    .string { color: #86efac; }
+    .number { color: #fde68a; }
+    .boolean { color: #c4b5fd; }
+    .null { color: #f87171; }
+
+    .message-log {
+      margin-top: 16px;
+      font-size: 12px;
+      color: var(--text-dim);
+      border-top: 1px solid var(--border);
+      padding-top: 12px;
+    }
+    .message-log summary {
+      cursor: pointer;
+      font-weight: 500;
+    }
+    .log-entry {
+      padding: 4px 0;
+      border-bottom: 1px solid var(--border);
+      font-family: var(--font-mono);
+      font-size: 11px;
+    }
+    .log-entry:last-child { border-bottom: none; }
+  </style>
+</head>
+<body>
+  <div id="waiting">
+    <div class="dot-pulse"><span></span><span></span><span></span></div>
+    <div>Waiting for trace data from LangSmith...</div>
+    <div style="font-size: 12px;">This renderer will display data sent via postMessage</div>
+  </div>
+
+  <div id="content">
+    <div class="header">
+      <span class="badge" id="typeBadge">--</span>
+      <span class="badge badge-count" id="countBadge"></span>
+      <span class="timestamp" id="timestamp"></span>
+    </div>
+
+    <div class="tabs">
+      <div class="tab active" data-panel="outputs">Outputs</div>
+      <div class="tab" data-panel="inputs">Inputs</div>
+      <div class="tab" data-panel="raw">Raw Message</div>
+    </div>
+
+    <div class="panel active" id="panel-outputs">
+      <div class="json-tree" id="outputsJson"></div>
+    </div>
+    <div class="panel" id="panel-inputs">
+      <div class="json-tree" id="inputsJson"></div>
+    </div>
+    <div class="panel" id="panel-raw">
+      <div class="json-tree" id="rawJson"></div>
+    </div>
+
+    <details class="message-log">
+      <summary>Message log (<span id="logCount">0</span>)</summary>
+      <div id="logEntries"></div>
+    </details>
+  </div>
+
+  <script>
+    const state = { messages: [] };
+
+    // Tab switching
+    document.querySelectorAll('.tab').forEach(tab => {
+      tab.addEventListener('click', () => {
+        document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+        document.querySelectorAll('.panel').forEach(p => p.classList.remove('active'));
+        tab.classList.add('active');
+        document.getElementById('panel-' + tab.dataset.panel).classList.add('active');
+      });
+    });
+
+    function syntaxHighlight(json) {
+      if (typeof json !== 'string') json = JSON.stringify(json, null, 2);
+      return json.replace(
+        /("(\\u[a-zA-Z0-9]{4}|\\[^u]|[^\\"])*"(\s*:)?|\b(true|false|null)\b|-?\d+(?:\.\d*)?(?:[eE][+\-]?\d+)?)/g,
+        (match) => {
+          let cls = 'number';
+          if (/^"/.test(match)) {
+            cls = /:$/.test(match) ? 'key' : 'string';
+          } else if (/true|false/.test(match)) {
+            cls = 'boolean';
+          } else if (/null/.test(match)) {
+            cls = 'null';
+          }
+          return '<span class="' + cls + '">' + match + '</span>';
+        }
+      );
+    }
+
+    function renderData(msg) {
+      const { type, data, metadata } = msg;
+
+      document.getElementById('waiting').style.display = 'none';
+      const content = document.getElementById('content');
+      content.classList.add('visible');
+
+      const badge = document.getElementById('typeBadge');
+      badge.textContent = type;
+      badge.className = 'badge ' + (type === 'output' ? 'badge-output' : 'badge-reference');
+
+      document.getElementById('countBadge').textContent = state.messages.length + ' messages';
+      document.getElementById('timestamp').textContent = new Date().toLocaleTimeString();
+
+      document.getElementById('outputsJson').innerHTML = syntaxHighlight(data || {});
+      document.getElementById('inputsJson').innerHTML = syntaxHighlight(metadata?.inputs || {});
+      document.getElementById('rawJson').innerHTML = syntaxHighlight(msg);
+    }
+
+    function addLogEntry(msg) {
+      state.messages.push({ time: new Date(), msg });
+      document.getElementById('logCount').textContent = state.messages.length;
+      const entry = document.createElement('div');
+      entry.className = 'log-entry';
+      entry.textContent = `[${new Date().toLocaleTimeString()}] type=${msg.type} keys=${Object.keys(msg.data || {}).join(',')}`;
+      document.getElementById('logEntries').prepend(entry);
+    }
+
+    window.addEventListener('message', (event) => {
+      const msg = event.data;
+      if (!msg || !msg.type) return;
+      addLogEntry(msg);
+      renderData(msg);
+    });
+  </script>
+</body>
+</html>
